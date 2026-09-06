@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Decibel Monitor</title>
+<style>
+  *{box-sizing:border-box}
+  body{
+    margin:0;font-family:Arial,Helvetica,sans-serif;
+    background:linear-gradient(135deg,#0f172a,#1e293b);
+    color:#fff;min-height:100vh;display:flex;justify-content:center;
+    padding:24px;
+  }
+  .app{width:min(760px,100%)}
+  .header{text-align:center;margin-bottom:22px}
+  .header h1{margin:0 0 8px;font-size:clamp(28px,6vw,44px)}
+  .header p{margin:0;color:#cbd5e1}
+  .card{
+    background:rgba(15,23,42,.86);border:1px solid #334155;
+    border-radius:24px;padding:24px;box-shadow:0 20px 60px rgba(0,0,0,.3)
+  }
+  .meter{
+    height:34px;background:#0b1220;border-radius:20px;overflow:hidden;
+    border:1px solid #334155;margin:22px 0 10px
+  }
+  .bar{height:100%;width:0%;transition:width .12s ease}
+  .reading{text-align:center}
+  .db{font-size:clamp(60px,15vw,100px);font-weight:800;line-height:1;margin:12px 0 4px}
+  .unit{font-size:22px;color:#94a3b8}
+  .status{
+    text-align:center;font-size:20px;font-weight:700;
+    padding:14px;border-radius:14px;margin:20px 0
+  }
+  .normal{background:#064e3b;color:#a7f3d0}
+  .warning{background:#78350f;color:#fde68a}
+  .danger{background:#7f1d1d;color:#fecaca}
+  .controls{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:18px}
+  .control{
+    background:#111827;border:1px solid #334155;border-radius:16px;padding:16px
+  }
+  label{display:flex;justify-content:space-between;font-weight:700;margin-bottom:12px}
+  input[type=range]{width:100%;accent-color:#60a5fa}
+  .limit-value{font-size:24px;color:#93c5fd}
+  button{
+    width:100%;border:0;border-radius:14px;padding:15px 18px;
+    font-size:17px;font-weight:700;cursor:pointer;margin-top:16px
+  }
+  #startBtn{background:#3b82f6;color:white}
+  #stopBtn{background:#334155;color:white}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:18px}
+  .stat{background:#111827;border:1px solid #334155;border-radius:14px;padding:14px;text-align:center}
+  .stat small{display:block;color:#94a3b8;margin-bottom:6px}
+  .stat strong{font-size:20px}
+  .note{color:#94a3b8;font-size:13px;line-height:1.5;margin-top:20px;text-align:center}
+  @media(max-width:600px){
+    .controls,.grid{grid-template-columns:1fr}
+    .card{padding:18px}
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="header">
+    <h1>🔊 Decibel Monitor</h1>
+    <p>Real-time sound level monitoring with an adjustable alarm.</p>
+  </div>
+
+  <div class="card">
+    <div class="reading">
+      <div class="db" id="dbValue">--</div>
+      <div class="unit">dB estimated</div>
+    </div>
+
+    <div class="meter"><div class="bar" id="bar"></div></div>
+    <div class="status normal" id="status">Microphone not started</div>
+
+    <div class="controls">
+      <div class="control">
+        <label>
+          <span>Alarm limit</span>
+          <span class="limit-value"><span id="limitValue">70</span> dB</span>
+        </label>
+        <input id="limit" type="range" min="40" max="110" value="70">
+      </div>
+
+      <div class="control">
+        <label>
+          <span>Alarm</span>
+          <span id="alarmState">ON</span>
+        </label>
+        <button id="toggleAlarm" style="margin-top:0;background:#059669;color:white">Turn alarm off</button>
+      </div>
+    </div>
+
+    <button id="startBtn">🎤 Start Monitoring</button>
+    <button id="stopBtn" disabled>⏹ Stop Monitoring</button>
+
+    <div class="grid">
+      <div class="stat"><small>Peak</small><strong id="peak">-- dB</strong></div>
+      <div class="stat"><small>Above limit</small><strong id="above">0s</strong></div>
+      <div class="stat"><small>Samples</small><strong id="samples">0</strong></div>
+    </div>
+
+    <p class="note">
+      Your browser will ask for microphone permission. This tool provides an estimated
+      sound level because phone and laptop microphones are not professionally calibrated.
+    </p>
+  </div>
+</div>
+
+<script>
+let audioContext, analyser, source, stream, data;
+let monitoring = false;
+let alarmEnabled = true;
+let peak = 0, sampleCount = 0, aboveStart = null, alarmPlaying = false;
+let animationId;
+
+const dbValue = document.getElementById('dbValue');
+const bar = document.getElementById('bar');
+const status = document.getElementById('status');
+const limit = document.getElementById('limit');
+const limitValue = document.getElementById('limitValue');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const toggleAlarm = document.getElementById('toggleAlarm');
+const alarmState = document.getElementById('alarmState');
+
+limit.addEventListener('input', () => limitValue.textContent = limit.value);
+
+toggleAlarm.addEventListener('click', () => {
+  alarmEnabled = !alarmEnabled;
+  alarmState.textContent = alarmEnabled ? 'ON' : 'OFF';
+  toggleAlarm.textContent = alarmEnabled ? 'Turn alarm off' : 'Turn alarm on';
+  if (!alarmEnabled) stopAlarm();
+});
+
+async function startMonitoring(){
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({audio:true});
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioContext.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.75;
+    source = audioContext.createMediaStreamSource(stream);
+    source.connect(analyser);
+    data = new Uint8Array(analyser.fftSize);
+
+    monitoring = true;
+    peak = 0; sampleCount = 0; aboveStart = null;
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    status.textContent = 'Listening…';
+    status.className = 'status normal';
+    measure();
+  }catch(err){
+    status.textContent = 'Microphone permission is required.';
+    status.className = 'status danger';
+    console.error(err);
+  }
+}
+
+function measure(){
+  if(!monitoring) return;
+
+  analyser.getByteTimeDomainData(data);
+
+  let sum = 0;
+  for(let i=0;i<data.length;i++){
+    const x = (data[i]-128)/128;
+    sum += x*x;
+  }
+  const rms = Math.sqrt(sum/data.length);
+
+  // Relative microphone level mapped to an approximate dB-like scale.
+  // This is intentionally labelled "estimated" because calibration varies by device.
+  let db = rms > 0.00001 ? 20*Math.log10(rms) + 90 : 0;
+  db = Math.max(0, Math.min(120, db));
+
+  sampleCount++;
+  peak = Math.max(peak, db);
+
+  dbValue.textContent = Math.round(db);
+  document.getElementById('peak').textContent = Math.round(peak) + ' dB';
+  document.getElementById('samples').textContent = sampleCount;
+
+  const percent = Math.min(100, Math.max(0, ((db-30)/(110-30))*100));
+  bar.style.width = percent + '%';
+
+  const threshold = Number(limit.value);
+
+  if(db >= threshold){
+    if(aboveStart === null) aboveStart = Date.now();
+    document.getElementById('above').textContent =
+      Math.floor((Date.now()-aboveStart)/1000) + 's';
+
+    status.textContent = '🚨 TOO LOUD — LIMIT EXCEEDED';
+    status.className = 'status danger';
+    if(alarmEnabled) startAlarm();
+  }else{
+    aboveStart = null;
+    document.getElementById('above').textContent = '0s';
+    status.textContent = db >= threshold-10 ? '⚠️ Getting close to the limit' : '✅ Normal sound level';
+    status.className = db >= threshold-10 ? 'status warning' : 'status normal';
+    stopAlarm();
+  }
+
+  animationId = requestAnimationFrame(measure);
+}
+
+let audioAlarmContext, oscillator, gain, speechTimer;
+
+function speakWarning(){
+  if(!('speechSynthesis' in window)) return;
+  speechSynthesis.cancel();
+  const msg = new SpeechSynthesisUtterance(
+    'THE SOUND IS TOO LOUD'
+  );
+  msg.rate = 0.92;
+  msg.pitch = 1.15;
+  msg.volume = 1;
+  speechSynthesis.speak(msg);
+}
+
+function startAlarm(){
+  if(alarmPlaying) return;
+  alarmPlaying = true;
+  audioAlarmContext = audioContext || new (window.AudioContext || window.webkitAudioContext)();
+
+  // Unusual alternating siren sound.
+  oscillator = audioAlarmContext.createOscillator();
+  gain = audioAlarmContext.createGain();
+  oscillator.type = 'sawtooth';
+  oscillator.frequency.value = 420;
+  gain.gain.value = 0.10;
+  oscillator.connect(gain);
+  gain.connect(audioAlarmContext.destination);
+  oscillator.start();
+
+  let high = false;
+  oscillator.pulseTimer = setInterval(() => {
+    if(oscillator){
+      high = !high;
+      oscillator.frequency.setValueAtTime(
+        high ? 1150 : 320,
+        audioAlarmContext.currentTime
+      );
+    }
+  }, 180);
+
+  // Voice warning immediately, then repeat every 3 seconds while too loud.
+  speakWarning();
+  speechTimer = setInterval(speakWarning, 3000);
+}
+
+function stopAlarm(){
+  if(!alarmPlaying) return;
+  alarmPlaying = false;
+  if(speechTimer){
+    clearInterval(speechTimer);
+    speechTimer = null;
+  }
+  if('speechSynthesis' in window) speechSynthesis.cancel();
+  if(oscillator){
+    clearInterval(oscillator.pulseTimer);
+    try{ oscillator.stop(); }catch(e){}
+    oscillator.disconnect();
+    oscillator = null;
+  }
+}
+
+function stopMonitoring(){
+  monitoring = false;
+  cancelAnimationFrame(animationId);
+  stopAlarm();
+  if(source) source.disconnect();
+  if(stream) stream.getTracks().forEach(track => track.stop());
+  if(audioContext) audioContext.close();
+
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  dbValue.textContent = '--';
+  bar.style.width = '0%';
+  status.textContent = 'Microphone stopped';
+  status.className = 'status normal';
+  document.getElementById('above').textContent = '0s';
+}
+
+startBtn.addEventListener('click', startMonitoring);
+stopBtn.addEventListener('click', stopMonitoring);
+</script>
+</body>
+</html>
